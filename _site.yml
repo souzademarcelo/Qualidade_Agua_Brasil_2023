@@ -1,0 +1,26 @@
+name: "Qualidade da Água no Brasil"                                # CHANGE HERE 
+output_dir: "."
+navbar:
+  title: "<img id=\"logo\"style=\"float: right;width: 60px;\" src=\"logo.png\" />"   
+  type: inverse
+  right:
+    - text: "Apresentação"
+      href: index.html
+    - text: "Oxigênio Dissolvido"
+      href: od.html
+    - text: "Demanda Bioquímica de Oxigênio"
+      href: dbo.html
+    - text: "Fósforo Total"
+      href: fosforo.html
+    - text: "IQA"
+      href: iqa.html
+    - text: "Contato"
+      icon: fa-envelope
+      href: mailto:marcelo.souza@ana.gov.br   
+  left:
+    - text: "Agência Nacional de Águas e Saneamento Básico"
+      href: https://www.gov.br/ana/pt-br
+output:
+  html_document:
+    theme: cerulean 
+    highlight: textmate
