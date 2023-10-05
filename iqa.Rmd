@@ -1,0 +1,189 @@
+---
+title: "**Qualidade da Água Superficial no Brasil**"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, collapse = TRUE, warning = FALSE, results='asis')
+
+```
+
+
+```{r packs, echo=FALSE, warning=FALSE, results='hide', message=FALSE}
+library(dplyr)
+library(tidyr)
+library(RPostgreSQL)
+library(ggplot2)
+library(lubridate)
+library(htmltools)
+library(rsconnect)
+library(shinyWidgets)
+library(nortest)
+library(DBI)
+library(NADA)
+library(readr)
+library(tidyverse)
+library(sf)
+library(mapview)
+library(Hmisc)
+library(knitr)
+library(kableExtra)
+library(htmlwidgets)
+library(sp)
+library(lattice)
+```
+
+```{r, echo=FALSE}
+#####################################################################################################################
+## CONFIGURA A CONSULTA
+#####################################################################################################################
+
+drv<- dbDriver("PostgreSQL")
+con <- dbConnect(drv, dbname = "qa_v01_14_local", 
+                 host = "localhost", port = 5432,
+                 user = "postgres", password ="postgres" )
+
+parametro <- 'iqa'
+parametro_abreviado <- "IQA"
+parametro_extenso <- "Índice de Qualidade da Água"
+
+serie_ini <- as.Date('2010-01-01', format = "%Y-%m-%d")
+serie_final <- as.Date('2023-12-31', format = "%Y-%m-%d")
+
+# Extrai os anos das datas
+ini <- substr(serie_ini, 1, 4)
+final <- substr(serie_final, 1, 4)
+
+```
+
+### **`r paste(parametro_extenso, " (", parametro_abreviado,")", sep="")`**
+
+**O IQA é um indicador composto por nove parâmetros físicos, químicos e biológicos, a saber: temperatura da água, pH, oxigênio dissolvido, demanda bioquímica de oxigênio, coliformes termotolerantes, nitrogênio total, fósforo total, sólidos totais e turbidez.** 
+
+A maior vantagem da utilização do IQA é a análise simultânea de diversos parâmetros considerados importantes para a avaliação geral da qualidade da água em um único resultado, que varia de zero a 100. Para facilitar a comunicação dos resultados para a sociedade, os valores do IQA são agrupados em categorias de qualidade da água variando entre péssima e ótima representadas por cores.
+
+***
+### **Distribuição dos pontos de monitoramento**
+
+Os dados utilizados no cálculo do IQA foram fornecidos pelas redes de monitoramento operadas por órgãos gestores de recursos hídricos das Unidades da Federação (UFs). A quantidade de pontos de monitoramento da qualidade da água nas UFs varia bastante no Brasil. A produção de informações hidrológicas, como as de qualidade da água, é fundamental para a gestão dos recursos hídricos. 
+
+A tabela abaixo mostra o número de pontos de monitoramento em cada UF com pelo menos uma observação de `r paste(parametro_abreviado, " entre ", ini, " e ", final, ".", sep="")`
+
+
+```{r stats_pontos, echo=FALSE, collapse = TRUE, layout="l-body-outset"}
+options(OutDec=",",  digits = "2")
+
+parametro_sql <- paste("SELECT codigo, data,  ", parametro, "  as valor, ", parametro, "_st as status FROM pgquali.qlttb_2_par_", parametro, " where ", parametro, "_st in (1,2) ORDER BY codigo", sep = "")
+  tbl <- dbGetQuery(con, parametro_sql)
+
+# Filtra para o período e valores impossíveis (OD<18 mg/L) segundo a referência: Readings above 18 mg/l are physically impossible at Earth’s surface: https://www.knowyourh2o.com/outdoor-4/dissolved-oxygen-in-water
+tbl <- tbl %>%
+  filter(data >= serie_ini & data <= serie_final, 
+         valor <= 100)
+
+# Contagem dos pontos
+ponto_obs <- length(unique(tbl$codigo))
+# Contagem das observações no período
+parametro_obs <- length(tbl$valor)
+
+# Importa tabela de pontos
+pontos_sql <- paste("SELECT codigo, uf, latitude, longitude, enquadramento, corpo_hidrico FROM pgquali.qltft_1_pontos ORDER BY uf, codigo;", sep = "")
+pontos <- dbGetQuery(con, pontos_sql)
+coordenadas <- data.frame(
+  codigo = c(pontos$codigo),
+  UF = c(pontos$uf),
+  lon = c(pontos$longitude[!is.na(pontos$longitude)]),
+  lat = c(pontos$latitude[!is.na(pontos$latitude)]),
+  classe = c(pontos$enquadramento),
+  rio = c(pontos$corpo_hidrico),
+  stringsAsFactors = FALSE)
+
+grouped_obs <- tbl %>%
+    group_by(codigo) %>%
+    summarise(n=n(), média=mean(valor), início=min(data), final=max(data)) 
+
+# grouped_obs <- tbl %>%
+#     group_by(codigo) %>%
+#     filter(n()>=10) %>%
+#     summarise(n=n(), media=mean(valor), desc2 = sum(desc_2))
+
+# Join da tabela de pontos com as observações 
+
+grouped_obs <- left_join(grouped_obs, coordenadas, by = c("codigo" = "codigo"))
+grouped_obs <- na.omit(grouped_obs)
+obs_uf <- grouped_obs %>%
+  group_by(UF) %>%
+    summarise(n = n(),.groups = 'drop') %>%
+    rename(Pontos = n)
+grouped_obs <- st_as_sf(grouped_obs, coords = c("lon", "lat"), crs = 4674) 
+
+# Tabela com contagem de pontos por UF
+
+knitr::kable(list(obs_uf[1:5,], obs_uf[6:10,], obs_uf[11:15,], obs_uf[16:20,]), format = "html", caption = "Pontos de monitoramento por Unidade da Federação", font_size = 16, booktabs = TRUE) %>%
+  kable_styling("striped", full_width = TRUE, position = "right", font_size = 14)
+
+
+msg1 <-  paste("Em nossa base de dados foram encontrados ", ponto_obs, " pontos de monitoramento com um total de ", parametro_obs, " observações de ", parametro_abreviado," entre ", ini, " e ", final, ". A tabela abaixo apresenta um sumário estatístico dos dados.", sep = "")
+cat(msg1)
+
+# Sumário estatístico
+summary1 <- t(c(summary(tbl$valor)))
+
+# Apresentão do sumário
+summary1 %>%
+  kbl(digits = 2, format = "html", caption = "Estatísticas de IQA (mg/L)", font_size = 16, booktabs = TRUE, col.names = c("Mín.", "Quartil 1","Mediana","Média","Quartil 3","Máx." ) ) %>%
+  kable_styling("striped", full_width = T, position = "left", font_size = 14)
+
+```
+
+Ao nível das Unidades da Federação, a distribuição dos pontos de monitoramento prioriza os locais de interesse para a gestão da qualidade da água dos rios e lagos. Questões logísticas relacionadas com a coleta de amostras de água também são levadas em consideração pelos operadores das redes para a distribuição dos pontos no território.
+
+O mapa abaixo mostra a localização dos pontos de monitoramento com valores de IQA. `r paste("Ao clicar nos pontos, o mapa interativo traz informações sobre o início e fim da série e o número de pontos onde foi possível calcular o ", parametro_abreviado, " no período analisado", sep="")`.
+
+```{r mapa1,  echo=FALSE, out.width='100%'}
+options(OutDec=",",  digits = "2")
+# Mapa de observações
+
+library(leafpop)
+pal <-  mapviewPalette("mapviewSpectralColors")
+mapview(grouped_obs["n"], popup = popupTable(grouped_obs, zcol=c("codigo", "n", "início", "final", "rio"), row.numbers=FALSE, feature.id=FALSE),
+        at = seq(40,144,13),
+      #  map.types = c("CartoDB.Positron", "Esri.WorldImagery"), 
+        cex = 3, # tamanho dos markers 
+        lwd = 0.2, #espessura da linha dos markers
+        alpha.regions = 100, #opacidade dos markers
+        legend = TRUE, 
+        col.regions = (pal (25)),
+        layer.name = "Total de observações")
+```
+***
+
+A quantidade de observações da concentração de `r paste(parametro_abreviado, sep="")` depende de quando a coleta de amostras teve início e fim, da frequência das coletas e da continuidade desta atividade. Geralmente, mais observações representam estatísticas mais confiáveis sobre a situação dos trechos monitorados.  
+
+
+***
+
+### **Cálculo das médias**   
+
+Médias de IQA para os pontos de monitoramento com, pelo menos, **10 observações no período**. No mapa abaixo, as cores indicam faixas de qualidade que variam entre **péssima (0-19), ruim (19-36), regular (36-51), boa (51-79) e ótima (79-100)**.`
+
+```{r mapa1_2,  echo=FALSE, out.width='100%'}
+options(OutDec=",",  digits = "2")
+library(leafpop)
+#pal <-  mapviewPalette("mapviewSpectralColors")
+#labels <- c("Péssima", "Ruim", "Regular", "Boa", "Ótima")
+
+pal = colorRampPalette(c('dark magenta', 'red', 'orange', 'yellow', 'lime green', 'light sky blue'))
+mapview(grouped_obs["média"], popup = popupTable(grouped_obs, zcol=c("codigo", "média", "n", "rio"), row.numbers=FALSE, feature.id=FALSE), 
+        at=c(0, 19, 36, 51, 79, 100),
+        cex = 3, # tamanho dos markers 
+        lwd = 0.2, #espessura da linha dos markers
+        alpha.regions = 100, #opacidade dos markers
+        legend = TRUE, 
+        col.regions = (pal (7)),
+        layer.name = "Classes de qualidade")
+
+
+```
+
+

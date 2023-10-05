@@ -1,0 +1,279 @@
+---
+title: "**Qualidade da Água Superficial no Brasil**"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, collapse = TRUE, warning = FALSE, results='asis')
+
+```
+
+
+```{r packs, echo=FALSE, warning=FALSE, results='hide', message=FALSE}
+library(dplyr)
+library(tidyr)
+library(RPostgreSQL)
+library(ggplot2)
+library(lubridate)
+library(htmltools)
+library(rsconnect)
+library(shinyWidgets)
+library(nortest)
+library(DBI)
+library(NADA)
+library(readr)
+library(tidyverse)
+library(sf)
+library(mapview)
+library(Hmisc)
+library(knitr)
+library(kableExtra)
+library(htmlwidgets)
+library(sp)
+library(lattice)
+library(leafpop)
+```
+
+```{r, echo=FALSE}
+#####################################################################################################################
+## CONFIGURA A CONSULTA
+#####################################################################################################################
+
+drv<- dbDriver("PostgreSQL")
+con <- dbConnect(drv, dbname = "qa_v01_14_local", 
+                 host = "localhost", port = 5432,
+                 user = "postgres", password ="postgres" )
+
+parametro <- 'fosfototal'
+parametro_abreviado <- "PT"
+parametro_extenso <- "fósforo total"
+
+serie_ini <- as.Date('2010-01-01', format = "%Y-%m-%d")
+serie_final <- as.Date('2023-12-31', format = "%Y-%m-%d")
+
+# Extrai os anos das datas
+ini <- substr(serie_ini, 1, 4)
+final <- substr(serie_final, 1, 4)
+
+```
+
+### **Fósforo total**
+
+**O fósforo é um nutriente limitante ao crescimento da flora aquática em reservatórios**. Assim como nas lavouras, a adição de fósforo na água a torna mais fértil para o crescimento de algas e plantas aquáticas. Quando este crescimento da flora aquática se torna excessivo, a qualidade da água fica reduzida e seus usos podem ser restringidos em decorrência de um processo conhecido como eutrofização.
+
+***
+### **Distribuição dos pontos de monitoramento**
+
+Os dados aqui apresentados foram fornecidos pelas redes de monitoramento operadas por órgãos gestores de recursos hídricos das Unidades da Federação (UFs). A quantidade de pontos de monitoramento da qualidade da água nas UFs  varia bastante no Brasil. A produção de informações hidrológicas, como as de qualidade da água, é fundamental para a gestão dos recursos hídricos. 
+
+A tabela abaixo mostra o número de pontos de monitoramento em cada UF com pelo menos uma observação de `r paste(parametro_abreviado, " entre ", ini, " e ", final, ".", sep="")`
+
+
+```{r stats_pontos, echo=FALSE, collapse = TRUE, layout="l-body-outset"}
+## converte separador de decimais para vírgula e limita decimais a 2 casas
+options(OutDec=",", digits = "2")
+
+## Traz os dados de observações do parâmetros do banco de dados e cria dataframe tbl
+parametro_sql <- paste("SELECT codigo, data,  ", parametro, "  as valor, ", parametro, "_st as status FROM pgquali.qlttb_2_par_", parametro, " where ", parametro, "_st in (1,2) ORDER BY codigo", sep = "")
+  tbl <- dbGetQuery(con, parametro_sql)
+
+tbl <- tbl %>%
+  rename("Código" = "codigo")
+
+# Filtra observações para o período e valores impossíveis (OD<18 mg/L) segundo a referência: Readings above 18 mg/l are physically impossible at Earth’s surface: https://www.knowyourh2o.com/outdoor-4/dissolved-oxygen-in-water
+tbl <- tbl %>%
+  filter(data >= serie_ini & data <= serie_final,
+         valor < 10)
+
+# Contagem de pontos que contem alguma observação no período  
+ponto_obs <- length(unique(tbl$codigo))
+
+# Contagem das observações no período
+parametro_obs <- length(tbl$valor)
+
+# Importa tabela de pontos do banco de dados
+pontos_sql <- paste("SELECT codigo, uf, latitude, longitude, enquadramento, corpo_hidrico, regime FROM pgquali.qltft_1_pontos ORDER BY uf, codigo;", sep = "")
+pontos <- dbGetQuery(con, pontos_sql)
+coordenadas <- data.frame(
+  Código = c(pontos$codigo),
+  UF = c(pontos$uf),
+  lon = c(pontos$longitude[!is.na(pontos$longitude)]),
+  lat = c(pontos$latitude[!is.na(pontos$latitude)]),
+  classe = c(pontos$enquadramento),
+  Rio = c(pontos$corpo_hidrico),
+  regime = c(pontos$regime),
+  stringsAsFactors = FALSE)
+
+# Cria o dataframe com infromações de enquadramento e faz a join com o dataframe das observações 
+classe <- data.frame(
+  Código = c(pontos$codigo),
+  Classe = c(pontos$enquadramento),
+  Regime = c(pontos$regime),
+  stringsAsFactors = FALSE)
+
+tbl <- left_join(tbl, classe, by = c("Código" = "Código"))
+tbl <- na.omit(tbl)
+
+
+# Cria o campo "limite" em tbl com os limites para cada classe de acordo com o parâmetro de qualidade
+tbl <- tbl %>%
+   mutate(limite = case_when (Classe<=2 & Regime == "lotico" ~ 0.1,
+                              Classe==3 & Regime == "lotico" ~ 0.15,
+                              Classe==4 & Regime == "lentico" ~ 0.15,
+                              Classe<=1 & Regime == "lentico" ~ 0.02,
+                              Classe<=2 & Regime == "lentico" ~ 0.03,
+                              Classe<=3 & Regime == "lentico" ~ 0.05,
+                              Classe<=4 & Regime == "lotico" ~ 0.15,
+                              Classe<=4 & Regime == "lentico" ~ 0.05,
+                              Classe>=12 & Regime == "lotico" ~ 0.1,
+                              Classe>=12 & Regime == "lentico" ~ 0.03))
+# Exclui ambiente marinho
+tbl <- tbl %>%
+  filter(Regime != "marinho")
+
+# cria o campo "desc" em tbl apontando desconformidade "1" ou conformidade "o" com a classe
+tbl <- tbl %>%
+   mutate(desc = case_when (valor>limite ~ 1, valor <= limite ~ 0))
+
+# cria o dataframe com as estatísticas agrupadas por ponto de monitoramento
+grouped_obs <- tbl %>%
+    group_by(Código) %>%
+    summarise(n=n(), Média=mean(valor), Desconformidade = (sum(desc)/n*100), Início=min(data), Final=max(data)) 
+
+# Converte o formato de data para o padrão do Brasil
+grouped_obs$Início <- format(grouped_obs$Início, "%d/%m/%Y")
+grouped_obs$Final <- format(grouped_obs$Final, "%d/%m/%Y")
+
+# Join das informações de pontos com as estatísticas 
+grouped_obs <- left_join(grouped_obs, coordenadas, by = c("Código" = "Código"))
+grouped_obs <- na.omit(grouped_obs)
+obs_uf <- grouped_obs %>%
+  group_by(UF) %>%
+    summarise(n = n(),.groups = 'drop') %>%
+    rename(Pontos = n)
+
+# cria o campo com a geometria para o mapa
+grouped_obs <- st_as_sf(grouped_obs, coords = c("lon", "lat"), crs = 4674) 
+
+# Cria o campo com a informação de enquadramento para ser visualizada pelo usuário
+grouped_obs <- grouped_obs %>%
+  mutate(Classe = case_when(
+ classe == 12 ~ "Não enquadrado",
+ classe == 0 ~ "Especial",
+ classe == 1 ~ "Classe 1",
+ classe == 2 ~ "Classe 2",
+ classe == 3 ~ "Classe 3",
+ classe == 4 ~ "Classe 4",
+ classe == 99 ~ "Sem informação",
+ is.na(classe) ~ "Sem informação"
+  )
+)
+
+# Cria tabela com contagem de pontos spara ser visualizada pelo usuário na página
+knitr::kable(list(obs_uf[1:5,], obs_uf[6:10,], obs_uf[11:15,], obs_uf[16:20,], obs_uf[21:25,]), format = "html", caption = "Pontos de monitoramento por Unidade da Federação", font_size = 16) %>%
+  kable_styling("striped", full_width = T, position = "left", font_size = 14)
+
+# Mensagem com estatísticas para ser visualizada pelo usuário na página
+msg1 <-  paste("Em nossa base de dados foram encontrados ", ponto_obs, " pontos de monitoramento com um total de ", parametro_obs, " observações de ", parametro_abreviado," entre ", ini, " e ", final, ". A tabela abaixo apresenta um sumário estatístico dos dados.", sep = "")
+cat(msg1)
+
+# Sumário estatístico e apresentação de pontos spara ser visualizada pelo usuário na página
+summary1 <- t(c(summary(tbl$valor)))
+
+summary1 %>%
+  kbl(digits = 2, format = "html", caption = "Estatísticas de fósforo total (mg/L)", font_size = 16, booktabs = TRUE, col.names = c("Mín.", "Quartil 1","Mediana","Média","Quartil 3","Máx." ) ) %>%
+  kable_styling("striped", full_width = T, position = "left", font_size = 14) 
+
+```
+
+Ao nível das Unidades da Federação, a distribuição dos pontos de monitoramento prioriza os locais de interesse para a gestão da qualidade da água dos rios e lagos. Questões logísticas relacionadas com a coleta de amostras de água também são levadas em consideração pelos operadores das redes para a distribuição dos pontos no território.   
+
+O mapa abaixo mostra a localização dos pontos de monitoramento com observações de OD. `r paste("Ao clicar nos pontos, o mapa interativo traz informações sobre o início e fim da série e o número de observações de ", parametro_abreviado, " no período analisado", sep="")`.
+
+
+```{r mapa1,  echo=FALSE, out.width='100%'}
+## converte separador de decimais para vírgula e limita decimais a 2 casas
+options(OutDec=",", digits = "2")
+
+
+# Mapa com pontos e séries históricas de dados
+pal = colorRampPalette(c( 'light sky blue', 'lime green',  'yellow', 'orange', 'red'))
+mapview(grouped_obs["n"], popup = popupTable(grouped_obs, zcol=c("Código", "n", "Início", "Final", "Rio", "Classe"), row.numbers=FALSE, feature.id=FALSE),
+        at=c(0, 20, 60, 120, 200),
+      #  map.types = c("CartoDB.Positron", "Esri.WorldImagery"), 
+        cex = 3, # tamanho dos markers 
+        lwd = 0.2, #espessura da linha dos markers
+        alpha.regions = 100, #opacidade dos markers
+        legend = TRUE, 
+        col.regions = (pal (25)),
+        layer.name = "Total de observações")
+```
+***
+
+A quantidade de observações da concentração de `r paste(parametro_abreviado, sep="")` depende de quando a coleta de amostras teve início e fim, da frequência das coletas e da continuidade desta atividade. Geralmente, mais observações representam estatísticas mais confiáveis sobre a situação dos trechos monitorados.  
+
+
+***
+
+### **Cálculo das médias**   
+
+`r paste("Médias das concentrações de ", parametro_abreviado, " (mg/L) para os pontos de monitoramento com, pelo menos, **10 observações no período**. No mapa abaixo, as cores mais escuras indicam trechos de rios em situação mais crítica em termos de ", parametro_abreviado, ".", sep="")`
+
+`r paste("No mapa abaixo, são apresentados os pontos de monitoramento e respectivas **frequências percentuais de desconformidade das concentrações de ", parametro_abreviado," com os padrões de qualidade previstos as respectivas classes de qualidade definidas para o trecho em que se encontra o ponto**. As cores mais escuras apontam os trechos onde a concentração de ", parametro_abreviado," fica mais frequentemente em desconformidade com a classe do trecho.", sep="")` 
+
+**Para esta análise, os padrões de qualidade da classe 2 foram considerados para pontos localizados em trechos não enquadrados por um normativo específico e trechos para os quais não temos informações sobre o enquadramento. Para os trechos enquadrados na classe especial, nos quais devem ser mantidas as condições naturais da qualidade da água, foram considerados os critérios da classe 1.**
+
+```{r mapa1_2,  echo=FALSE, out.width='100%'}
+## converte separador de decimais para vírgula e limita decimais a 2 casas
+options(OutDec=",", digits = "2")
+
+# Elimina séries com menos de 10 observações para o mapa de desconformidade
+grouped_obs <- grouped_obs %>%
+      filter(n>=10)
+
+# Mapa com médias das séries
+pal = colorRampPalette(c('light sky blue', 'corn flower blue', 'lime green', 'orange', 'red', 'dark magenta'))
+mapview(grouped_obs["Média"], popup = popupTable(grouped_obs, zcol=c("Código","Início", "Final", "n", "Média", "Rio", "Classe"), row.numbers=FALSE, feature.id=FALSE),  
+        at=c(0, 0.02, 0.03, 0.05, 0.1, 0.15, 100),
+        cex = 3, # tamanho dos markers 
+        lwd = 0.2, #espessura da linha dos markers
+        alpha.regions = 100, #opacidade dos markers
+        legend = TRUE, 
+        col.regions = pal (100),
+        layer.name = "Concentração média (mg/L)")
+```
+
+***
+#### **Desconformidade em relação à classe de qualidade**   
+
+`r paste("De acordo com os padrões do enquadramento de corpos hídricos, **a concentração máxima de ", parametro_abreviado, " para águas de classe 1 ou 2 é 0,10 mg/L e para as Classes 3 ou 4  é 0,15 mg/L para rios (ambientes lóticos). Para os ambientes lênticos, como reservatórios e lagos, o limites máximo para a Classe 1 é 0,02; para a Classe 2 é 0,03 mg/L; e para águas de Classe 3 ou 4 é 0,05 mg/L (Res. CONAMA nº 357/2005)**", sep="")`.
+
+
+`r paste("No mapa abaixo, são apresentados os pontos de monitoramento e respectivas **frequências percentuais de desconformidade das concentrações de ", parametro_abreviado," com os padrões de qualidade previstos as respectivas classes de qualidade definidas para o trecho em que se encontra o ponto**. As cores mais escuras apontam os trechos onde a concentração de ", parametro_abreviado," fica mais frequentemente em desconformidade com a classe do trecho.", sep="")` 
+
+**Para esta análise, os padrões de qualidade da classe 2 foram considerados para pontos localizados em trechos não enquadrados por um normativo específico e trechos para os quais não temos informações sobre o enquadramento. Para os trechos enquadrados na classe especial, nos quais devem ser mantidas as condições naturais da qualidade da água, foram considerados os critérios da classe 1.**
+
+
+```{r mapa1_3, echo=FALSE, out.width='100%'}
+## converte separador de decimais para vírgula e limita decimais a 2 casas
+options(OutDec=",",  digits = "2")
+
+# Elimina séries com menos de 10 observações para o mapa de desconformidade
+grouped_obs <- grouped_obs %>%
+      filter(n>=10)
+
+pal = colorRampPalette(c('light sky blue', 'lime green', 'orange', 'red', 'dark magenta'))
+mapview(grouped_obs["Desconformidade"],  popup = popupTable(grouped_obs, zcol=c("Código", "Rio", "n", "Média", "Início", "Final", "Classe", "Desconformidade"), row.numbers=FALSE, feature.id=FALSE),
+        at = seq(0,100,20),
+       # map.types = c("CartoDB.Positron", "Esri.WorldImagery"), 
+        cex = 3, # tamanho dos markers 
+        lwd = 0.2, #espessura da linha dos markers
+        alpha.regions = 100, #opacidade dos markers
+        legend = TRUE, 
+        col.regions = (pal (100)),
+        layer.name = "Desconformidade com classe (%)")
+
+```
+
+
+
